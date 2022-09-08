@@ -1,0 +1,1 @@
+shortcut -t "d:\program files\johnsapp\test.exe" -n "Johns App.lnk" -i "d:\program files\johnicon\icon1.ico" -x 0 -d "e:\johns\data"
