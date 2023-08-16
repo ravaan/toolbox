@@ -10,5 +10,6 @@ export NVM_DIR="$HOME/.nvm"
 sudo npm i -g pm2
 sudo apt update
 sudo apt install nginx
+sudo apt install certbot python3-certbot-nginx < y
 pub_key="<YOUR_KEY_GOES_HERE>"
 echo $pub_key >> ~/.ssh/id_rsa.pub
