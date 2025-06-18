@@ -1,101 +1,107 @@
 /**
- * syncBusyBulk
+ * syncBusyPattern1
  *
- * Bulk-optimized aggregator:
- * - Syncs your busy slots from multiple source calendars (some require you to have
- *   accepted, others are “busy-only” shared so we include all).
- * - Tags each block with the source calendar ID.
- * - Skips duplicates based on identical start, end, and source marker.
- * - Syncs for the next 30 days.
- * - this will take time to sync for the first time but then will happend in less than 5 seconds
+ * Two-phase sync (cleanup + add) for your “Combined Busy” calendar:
+ * 1. Builds a Set of all source event keys (start|end|marker) from each src calendar.
+ * 2. Fetches all destCal events in the same window:
+ *    • Deletes any dest event whose key is NOT in the source Set.
+ * 3. Adds any source event whose key was not in the original dest Set.
+ *
+ * Syncs for the next 30 days, tags by source ID, skips duplicates, and can log details.
  *
  * @param {boolean} enableLogging  
- *    If true, logs per-calendar & per-event details. Always logs start/end.
+ *    If true, logs per-step & per-event details. Always logs start/end.
  */
-function syncBusyBulk(enableLogging = false) {
-  // List each calendar + whether you only want events you’ve accepted
+function syncBusy(enableLogging = false) {
   const srcCalendars = [
     { id: 'cal1id@...',    requireAccepted: true  },
-    { id: 'cal1id@...',           requireAccepted: false  }, // shared busy-only
-    { id: 'cal1id@...',        requireAccepted: false },  // shared busy-only
+    { id: 'cal2id@...',           requireAccepted: false  }, // shared busy-only
+    { id: 'cal3id@...',        requireAccepted: false },  // shared busy-only
   ];
-  const destCalId = 'group-cal-id@...';
+  const destCalId = 'group-cal-id@group.calendar.google.com';
   const destCal   = CalendarApp.getCalendarById(destCalId);
 
-  Logger.log(`syncBusyBulk START at ${new Date().toISOString()}`);
+  Logger.log(`syncBusyPattern1 START at ${new Date().toISOString()}`);
 
-  // 1) Time window: now → 30 days from now
+  // 1) Define time window
   const now   = new Date();
   const later = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-  // 2) Fetch all existing “Busy” events once
-  const existing = destCal.getEvents(now, later);
-  if (enableLogging) {
-    Logger.log(`Loaded ${existing.length} existing events from destCal`);
-  }
-
-  // 3) Build a Set of "start|end|marker"
-  const existingKeys = new Set(
-    existing.map(ev => {
-      const s = ev.getStartTime().getTime();
-      const e = ev.getEndTime().getTime();
-      const m = ev.getDescription() || '';
-      return `${s}|${e}|${m}`;
-    })
-  );
-
-  // 4) Scan each source calendar, collect NEW slots
-  const toCreate = [];
-  srcCalendars.forEach(cfg => {
-    const { id: srcId, requireAccepted } = cfg;
-    if (enableLogging) Logger.log(`\n🔄 Checking source: ${srcId}`);
-
-    // fetch all events in window
+  // 2) Collect all source event keys
+  const sourceEvents = [];
+  const sourceKeys   = new Set();
+  srcCalendars.forEach(({ id: srcId, requireAccepted }) => {
+    if (enableLogging) Logger.log(`\n🔄 Fetching from ${srcId}`);
     let evts = CalendarApp.getCalendarById(srcId).getEvents(now, later);
-
-    // if this calendar requires acceptance, filter accordingly
     if (requireAccepted) {
       evts = evts.filter(e => e.getMyStatus() === CalendarApp.GuestStatus.YES);
-      if (enableLogging) {
-        Logger.log(` → ${evts.length} ACCEPTED events in ${srcId}`);
-      }
+      if (enableLogging) Logger.log(` → ${evts.length} accepted events`);
     } else if (enableLogging) {
-      Logger.log(` → ${evts.length} total events (no acceptance filter) in ${srcId}`);
+      Logger.log(` → ${evts.length} total events`);
     }
-
     evts.forEach(e => {
-      const start  = e.getStartTime().getTime();
-      const end    = e.getEndTime().getTime();
-      const marker = `from ${srcId}`;
-      const key    = `${start}|${end}|${marker}`;
-
-      if (!existingKeys.has(key)) {
-        existingKeys.add(key);
-        toCreate.push({ start, end, marker });
-        if (enableLogging) {
-          Logger.log(`  → Queued: ${new Date(start).toISOString()} → ${new Date(end).toISOString()} (${marker})`);
-        }
-      } else if (enableLogging) {
-        Logger.log(`  ⏭️ Skipping duplicate: ${new Date(start).toISOString()} → ${new Date(end).toISOString()} (${marker})`);
-      }
+      const startMs = e.getStartTime().getTime();
+      const endMs   = e.getEndTime().getTime();
+      const marker  = `from ${srcId}`;
+      const key     = `${startMs}|${endMs}|${marker}`;
+      sourceKeys.add(key);
+      sourceEvents.push({ startMs, endMs, marker, key });
     });
   });
 
-  // 5) Bulk-create all new events
-  if (enableLogging) {
-    Logger.log(`\nCreating ${toCreate.length} new Busy event(s) in destCal`);
-  }
-  toCreate.forEach(item => {
-    destCal.createEvent(
-      'Busy',
-      new Date(item.start),
-      new Date(item.end),
-      { description: item.marker }
-    );
+  // 3) Fetch destCal events & build destKeys
+  const destEvents = destCal.getEvents(now, later);
+  const destKeys   = new Set();
+  destEvents.forEach(ev => {
+    const s = ev.getStartTime().getTime();
+    const e = ev.getEndTime().getTime();
+    const m = ev.getDescription() || '';
+    destKeys.add(`${s}|${e}|${m}`);
+  });
+  if (enableLogging) Logger.log(`\nLoaded ${destEvents.length} events from destCal`);
+
+  // 4) Cleanup: delete dest events not in sourceKeys
+  destEvents.forEach(ev => {
+    const s = ev.getStartTime().getTime();
+    const e = ev.getEndTime().getTime();
+    const m = ev.getDescription() || '';
+    const key = `${s}|${e}|${m}`;
+    if (!sourceKeys.has(key)) {
+      ev.deleteEvent();
+      if (enableLogging) {
+        Logger.log(`🗑️ Deleted stale: ${new Date(s).toISOString()} → ${new Date(e).toISOString()} (${m})`);
+      }
+    }
   });
 
-  Logger.log(`syncBusyBulk DONE at ${new Date().toISOString()}`);
+  // 5) Addition: create missing source events
+  const toCreate = sourceEvents.filter(({ key }) => !destKeys.has(key));
+  if (enableLogging) {
+    Logger.log(`\nCreating ${toCreate.length} new Busy event(s)`);
+  }
+  toCreate.forEach(({ startMs, endMs, marker }) => {
+    destCal.createEvent(
+      'Busy',
+      new Date(startMs),
+      new Date(endMs),
+      { description: marker }
+    );
+    if (enableLogging) {
+      Logger.log(`✅ Created: ${new Date(startMs).toISOString()} → ${new Date(endMs).toISOString()} (${marker})`);
+    }
+  });
+
+  Logger.log(`syncBusyPattern1 DONE at ${new Date().toISOString()}`);
 }
+
+/**
+ * Example usage:
+ *   // Dry run: cleanup + add with minimal logging
+ *   syncBusyPattern1(false);
+ *
+ *   // Verbose mode: see every step
+ *   syncBusyPattern1(true);
+ */
 
 
 
