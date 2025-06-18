@@ -116,7 +116,7 @@ function syncBusy(enableLogging = false) {
  */
 
 function purgeFutureEvents(deleteFlag = false) {
-  const CALENDAR_ID = '7c2bef9af5906f0995a42299583180d22fa42e178ede897b31c0fcad28fcfc68@group.calendar.google.com';
+  const CALENDAR_ID = 'group-calendar@group.calendar.google.com';
   const calendar    = CalendarApp.getCalendarById(CALENDAR_ID);
   const now         = new Date();
   // Far-future cutoff (will capture events up to year 2100)
