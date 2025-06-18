@@ -39,7 +39,7 @@ function syncBusy() {
   );
 
   const now   = new Date();
-  const later = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const later = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
   srcIds.forEach(srcId => {
     const events = CalendarApp
