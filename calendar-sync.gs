@@ -1,137 +1,156 @@
 /**
- * Busy-Sync for Google Calendar
- * =============================
- * Mirrors “Busy” blocks from multiple **source calendars** into one or more
- * **destination calendars** for a configurable look-ahead window.
+ * Combined Busy Calendar Synchronizer v2.4 (2025‑06‑22)
+ * ------------------------------------------------------
+ * Mirrors **busy** blocks from one or more **source calendars** into one or
+ * more **destination calendars** for a configurable look‑ahead window.
  *
- * ––– FEATURES –––
- * • Two-phase sync per destination (delete stale, then add new)
- * • Events are tagged with their source calendar-id (`description`) so
- *   subsequent runs de-duplicate cleanly
- * • Destinations are processed **in order** — first one finishes first
- * • Resilient: if any source or destination calendar throws, the script
- *   logs the error and continues
- * • Optional e-mail summary per destination
+ *  • Two‑phase sync per destination — delete stale events, then add new ones.  
+ *  • Events are tagged (`description`) with their source calendar‑id so the
+ *    script can de‑duplicate cleanly next run.  
+ *  • **Every destination MUST provide its own `sources` list.**  
+ *  • Each destination **may** override the global `lookAheadDays`.  
+ *  • Destinations are processed **in the order listed** — the first calendar
+ *    always finishes first.  
+ *  • Resilient: if any individual source or destination calendar errors out,
+ *    the script logs the issue and continues with the rest.  
  *
- * ––– USAGE –––
- *   1. Fill in the CONFIG section with your own calendar IDs / emails.
- *   2. Deploy as “Apps Script” and bind `syncBusyCalendars()` to a
- *      time-driven trigger (e.g. every 15 minutes).
- *   3. Commit this file to GitHub. No secrets are hard-coded.
+ * Bind `syncBusyCalendars()` to a time‑driven trigger or run manually.
  *
- * ENV  Google Apps Script (V8 runtime)
- * AUTHOR Your Name
- * LICENSE MIT
- * VERSION 2.1.0 (2025-06-22)
+ * ENV Google Apps Script (V8)
+ * AUTHOR Arpit Agarwal
  */
 
-/* ───────────────────────────── CONFIGURATION ──────────────────────────── *
- * Replace each placeholder with **your** values before first run.
- * No secrets? Add this file to Git and you’re good.                       */
+/* ───────────────────────────── CONFIGURATION ───────────────────────────── */
 
 const CONFIG = {
-  /** How far ahead to mirror events (in days) */
+  /** Default look‑ahead window when a destination does not override (days) */
   lookAheadDays: 30,
 
-  /** Source calendars — replace with your IDs */
-  sourceCalendars: [
-    { id: 'YOUR_SOURCE_CAL_ID_1' },
-    { id: 'YOUR_SOURCE_CAL_ID_2' },
-    { id: 'YOUR_SOURCE_CAL_ID_3' }
-  ],
-
-  /** Destination calendars (processed top-to-bottom) */
+  /**
+   * Destination calendars (processed top‑to‑bottom)
+   *  ─ id              : Destination calendar‑ID
+   *  ─ sources[]       : REQUIRED. Array of source calendar‑IDs (string) **or**
+   *                      objects of form { id: "…" }
+   *  ─ lookAheadDays   : OPTIONAL. Overrides global window for this destination
+   */
   destinationCalendars: [
     {
-      id: 'YOUR_DEST_CAL_ID_1',
-      /* Optional summary e-mail list (comma-separated) */
-      notifyEmails: ['your.email@example.com']
+      id: 'group-calendar-id@group.calendar.google.com',
+      sources: [
+        '1@1.com',
+        '2@2.com',
+        '3@3.com'
+      ],
+      lookAheadDays: 14 // two‑week view for this calendar
     }
-    // { id: 'YOUR_DEST_CAL_ID_2', notifyEmails: [] }
+    // Add more destinations as needed…
   ]
 };
 
-/* ─────────────────────────────── PUBLIC ENTRY ─────────────────────────── */
+/* ─────────────────────────────── PUBLIC ENTRY ──────────────────────────── */
 /**
- * Main entry point.
+ * Main entry.
  *
  * @param {Object}  [opts]
- * @param {boolean} [opts.enableLogging=false] Verbose stack-driver logs
- * @param {number}  [opts.lookAheadDays]       Override default window
+ * @param {boolean} [opts.enableLogging=false] Verbose log output.
+ * @param {number}  [opts.lookAheadDays]       Override global default window.
  */
 function syncBusyCalendars (opts = {}) {
-  const enableLogging = opts.enableLogging ?? false;
-  const lookAheadDays = opts.lookAheadDays ?? CONFIG.lookAheadDays;
+  const enableLogging        = opts.enableLogging ?? true;
+  const defaultLookAheadDays = opts.lookAheadDays ?? CONFIG.lookAheadDays;
 
-  const [winStart, winEnd] = _windowBounds(lookAheadDays);
-  _log(enableLogging,
-       `🚀 Busy-Sync START — ${winStart.toDateString()} → ${winEnd.toDateString()}`);
-
-  /* 1️⃣ COLLECT SOURCE EVENTS (best-effort) */
-  const { sourceEvents, sourceKeys } =
-    _collectSourceEvents(CONFIG.sourceCalendars, winStart, winEnd, enableLogging);
-
-  /* 2️⃣ SYNC EACH DESTINATION (order matters) */
   CONFIG.destinationCalendars.forEach((dest, idx) => {
-    let summary = { created: 0, deleted: 0 };
+    if (!dest.sources || !dest.sources.length) {
+      _log(true, `⚠️  DEST SKIPPED (#${idx + 1} — ${dest.id}): no sources configured`);
+      return;
+    }
 
+    /* Determine look‑ahead window for this destination */
+    const lookAheadDays = dest.lookAheadDays ?? defaultLookAheadDays;
+    const [winStart, winEnd] = _getWindowBounds(lookAheadDays);
+    _log(enableLogging, `\n🚀  START (#${idx + 1}) ${dest.id} — ${winStart.toDateString()} → ${winEnd.toDateString()}`);
+
+    /* Collect source events (best‑effort) */
+    const destSources = dest.sources.map(src => (typeof src === 'string' ? { id: src } : src));
+    const { sourceEvents, sourceKeys } =
+      _collectSourceEvents(destSources, winStart, winEnd, enableLogging);
+
+    /* Sync the destination */
+    let summary = { created: 0, deleted: 0 };
     try {
       summary = _syncDestination(dest, sourceEvents, sourceKeys,
                                  winStart, winEnd, enableLogging);
+      _log(enableLogging, `   ↳ Summary: +${summary.created} / -${summary.deleted}`);
     } catch (e) {
-      _log(true, `❌ DEST ERROR (${dest.id}): ${e.message}`);
-      dest.errored = true;
+      _log(true, `❌  DEST ERROR (${dest.id}): ${e.message}`);
     }
-
-    if (dest.notifyEmails?.length) _sendSummaryEmail(dest, summary, lookAheadDays);
-    _log(enableLogging, `— Finished destination #${idx + 1}: ${dest.id}`);
   });
 
-  _log(enableLogging, '✅ Busy-Sync DONE');
+  _log(enableLogging, `\n✅  DONE`);
 }
 
-/* ────────────────────────────── CORE LOGIC ────────────────────────────── */
+/* ────────────────────────────── CORE LOGIC ─────────────────────────────── */
+/**
+ * Sync one destination calendar.
+ *
+ * @param {{id:string}}                      dest
+ * @param {Array.<SourceEvent>}              sourceEvents
+ * @param {Set<string>}                      sourceKeys
+ * @param {Date}                             winStart
+ * @param {Date}                             winEnd
+ * @param {boolean}                          enableLogging
+ * @return {{created:number,deleted:number}}
+ */
 function _syncDestination (dest, sourceEvents, sourceKeys,
                            winStart, winEnd, enableLogging) {
   const destCal = CalendarApp.getCalendarById(dest.id);
   if (!destCal) throw new Error('destination calendar not found');
 
-  _log(enableLogging, `\n🔄 Syncing → ${dest.id}`);
-
-  /* Build key-set of existing destination events */
+  /* Build key‑set for existing destination events */
   const destEvents = destCal.getEvents(winStart, winEnd);
   const destKeys   = new Set(destEvents.map(e =>
-    _key(e.getStartTime(), e.getEndTime(), e.getDescription())
+    _buildKey(e.getStartTime(), e.getEndTime(), e.getDescription())
   ));
+  _log(enableLogging, `   ↳ Loaded ${destEvents.length} dest events`);
 
-  /* Phase 1 — CLEANUP */
+  /* Phase 1 — CLEANUP */
   let deleted = 0;
   destEvents.forEach(ev => {
-    const key = _key(ev.getStartTime(), ev.getEndTime(), ev.getDescription());
-    if (!sourceKeys.has(key)) { ev.deleteEvent(); deleted++; }
+    const key = _buildKey(ev.getStartTime(), ev.getEndTime(), ev.getDescription());
+    if (!sourceKeys.has(key)) {
+      ev.deleteEvent();
+      deleted++;
+      _log(enableLogging, `   🗑️ Deleted: ${ev.getStartTime()}‑${ev.getEndTime()} (${ev.getDescription()})`);
+    }
   });
 
-  /* Phase 2 — ADDITION */
+  /* Phase 2 — ADDITION */
   const toCreate = sourceEvents.filter(se => !destKeys.has(se.key));
-  toCreate.forEach(({ start, end, marker }) =>
-    destCal.createEvent('Busy', start, end, { description: marker })
-  );
+  toCreate.forEach(({ start, end, marker }) => {
+    destCal.createEvent('Busy', start, end, { description: marker });
+    _log(enableLogging, `   ✅ Created: ${start}‑${end} (${marker})`);
+  });
 
-  const created = toCreate.length;
-  _log(enableLogging, `   ↳ ${created} created, ${deleted} deleted`);
-  return { created, deleted };
+  return { created: toCreate.length, deleted };
 }
 
 /* ─────────────────────────────── HELPERS ──────────────────────────────── */
-const ONE_DAY_MS = 86_400_000;
-
-/** Convert look-ahead days → [start, end] Date objects. */
-function _windowBounds (days) {
+/** Convert look‑ahead days → [start, end] Date objects. */
+function _getWindowBounds (days) {
   const start = new Date();
-  const end   = new Date(start.getTime() + days * ONE_DAY_MS);
+  const end   = new Date(start.getTime() + days * 86_400_000); // 24 h × 60 m × 60 s × 1000 ms
   return [start, end];
 }
 
+/**
+ * Pull events from all source calendars (best‑effort).
+ *
+ * @param {Array.<{id:string}>} srcCals
+ * @param {Date}    winStart
+ * @param {Date}    winEnd
+ * @param {boolean} enableLogging
+ * @return {{sourceEvents:Array.<SourceEvent>,sourceKeys:Set<string>}}
+ */
 function _collectSourceEvents (srcCals, winStart, winEnd, enableLogging) {
   const sourceEvents = [];
   const sourceKeys   = new Set();
@@ -143,58 +162,38 @@ function _collectSourceEvents (srcCals, winStart, winEnd, enableLogging) {
       const events = cal.getEvents(winStart, winEnd);
 
       _log(enableLogging, `• Pulled ${events.length} event(s) from ${id}`);
+
       events.forEach(ev => {
         const marker = `from ${id}`;
-        const key    = _key(ev.getStartTime(), ev.getEndTime(), marker);
+        const key    = _buildKey(ev.getStartTime(), ev.getEndTime(), marker);
         sourceEvents.push({ start: ev.getStartTime(), end: ev.getEndTime(), marker, key });
         sourceKeys.add(key);
       });
     } catch (e) {
-      _log(true, `❌ SRC ERROR (${id}): ${e.message}`);
+      _log(true, `❌ SRC ERROR (${id}): ${e.message}`);
     }
   });
 
+  _log(enableLogging, `   ↳ Total unique source events: ${sourceEvents.length}`);
   return { sourceEvents, sourceKeys };
 }
 
 /** Build a unique key “start|end|marker”. */
-const _key = (start, end, marker = '') =>
-  `${start.getTime()}|${end.getTime()}|${marker}`;
-
-/**
- * Send an e-mail summary (optional). Errors are swallowed to avoid
- * interrupting subsequent destinations.
- */
-function _sendSummaryEmail (dest, summary, lookAheadDays) {
-  try {
-    const subject = `Busy-Sync summary → ${dest.id}`;
-    const body =
-      `Busy-Sync completed\n\n` +
-      `Destination   : ${dest.id}\n` +
-      `Window (days) : ${lookAheadDays}\n` +
-      `Added events  : ${summary.created}\n` +
-      `Removed events: ${summary.deleted}\n` +
-      `Status        : ${dest.errored ? 'ERROR' : 'OK'}\n` +
-      `Timestamp     : ${new Date().toISOString()}\n`;
-
-    MailApp.sendEmail(dest.notifyEmails.join(','), subject, body);
-  } catch (e) {
-    Logger.log(`❌ MAIL ERROR (${dest.id}): ${e.message}`);
-  }
+function _buildKey (start, end, marker = '') {
+  return `${start.getTime()}|${end.getTime()}|${marker}`;
 }
 
 /** Conditional logger. */
-const _log = (enabled, msg) => { if (enabled) Logger.log(msg); };
+function _log (enabled, msg) { if (enabled) Logger.log(msg); }
 
-/* ───────────────────────────── TYPE DEFINITIONS ───────────────────────── */
+/* ───────────────────────────── TYPE DEFS ──────────────────────────────── */
 /**
  * @typedef  {Object}  SourceEvent
- * @property {Date}    start   Event start date
- * @property {Date}    end     Event end date
- * @property {string}  marker  “from <calendar-id>”
- * @property {string}  key     Unique key for de-duplication
+ * @property {Date}    start
+ * @property {Date}    end
+ * @property {string}  marker
+ * @property {string}  key
  */
-
 
 
 /**
