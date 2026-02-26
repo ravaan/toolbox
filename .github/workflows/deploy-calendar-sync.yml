@@ -1,0 +1,91 @@
+# Deploy Calendar Sync to Google Apps Script
+#
+# Triggers on push to master when files in calendar-sync/ change.
+# Uses clasp to push code and update the web app deployment.
+#
+# Required GitHub Secrets:
+#   CLASP_REFRESH_TOKEN   - OAuth refresh token from ~/.clasprc.json
+#   CLASP_CLIENT_ID       - OAuth client ID from ~/.clasprc.json
+#   CLASP_CLIENT_SECRET   - OAuth client secret from ~/.clasprc.json
+#   CLASP_DEPLOYMENT_ID   - Apps Script deployment ID (from `clasp deployments`)
+#
+# First-time setup checklist:
+#   1. npm install -g @google/clasp
+#   2. Enable Apps Script API: https://script.google.com/home/usersettings
+#   3. Get Script ID from project settings in Apps Script editor
+#   4. Put Script ID in calendar-sync/.clasp.json
+#   5. clasp login (creates ~/.clasprc.json with tokens)
+#   6. CRITICAL: Set GCP OAuth consent screen to "Production" (not "Testing")
+#      Otherwise the refresh token expires in 7 days!
+#   7. Enable Google Calendar API in GCP console (APIs & Services > Library)
+#   8. Extract secrets from ~/.clasprc.json and store in GitHub repo secrets
+#   9. Run `clasp deploy` once locally to get the deployment ID
+
+name: Deploy Calendar Sync
+
+# ⚠️ DISABLED: This workflow is disabled until first-time setup is complete.
+# To enable: uncomment the push trigger below and remove the workflow_dispatch-only block.
+# See calendar-sync/SETUP.md for the full setup checklist.
+
+# on:
+#   push:
+#     branches:
+#       - master
+#     paths:
+#       - 'calendar-sync/**'
+
+on:
+  workflow_dispatch:  # Manual trigger only until setup is done
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install clasp (pinned version)
+        run: npm install -g @google/clasp@2.4.2
+
+      - name: Write clasp credentials
+        run: |
+          cat > ~/.clasprc.json << 'CREDS'
+          {
+            "token": {
+              "access_token": "",
+              "refresh_token": "${{ secrets.CLASP_REFRESH_TOKEN }}",
+              "scope": "https://www.googleapis.com/auth/script.projects https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/script.deployments https://www.googleapis.com/auth/service.management https://www.googleapis.com/auth/logging.read https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cloud-platform",
+              "token_type": "Bearer",
+              "expiry_date": 1
+            },
+            "oauth2ClientSettings": {
+              "clientId": "${{ secrets.CLASP_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.CLASP_CLIENT_SECRET }}",
+              "redirectUri": "http://localhost"
+            },
+            "isLocalCreds": false
+          }
+          CREDS
+
+      - name: Validate script ID is not placeholder
+        working-directory: calendar-sync
+        run: |
+          if grep -q "YOUR_APPS_SCRIPT_PROJECT_ID_HERE" .clasp.json; then
+            echo "ERROR: .clasp.json still has placeholder scriptId!"
+            exit 1
+          fi
+
+      - name: Push code to Apps Script
+        working-directory: calendar-sync
+        run: clasp push --force
+
+      - name: Update web app deployment
+        if: ${{ secrets.CLASP_DEPLOYMENT_ID != '' }}
+        working-directory: calendar-sync
+        run: clasp deploy -i "${{ secrets.CLASP_DEPLOYMENT_ID }}" -d "Auto-deploy $(date -u +%Y-%m-%dT%H:%M:%SZ)"

@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      --bg: #fafafa;
+      --card: #ffffff;
+      --text: #1a1a1a;
+      --text-muted: #666;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --border: #e5e7eb;
+      --success: #059669;
+      --error: #dc2626;
+      --slot-bg: #f0f7ff;
+      --slot-hover: #dbeafe;
+      --slot-selected: #2563eb;
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 560px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-bottom: 16px;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      margin-bottom: 20px;
+    }
+
+    /* Date pills */
+    .dates {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 8px;
+      margin-bottom: 16px;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .date-pill {
+      flex-shrink: 0;
+      padding: 8px 16px;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      background: var(--card);
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: all 0.15s;
+      text-align: center;
+      min-width: 80px;
+    }
+
+    .date-pill:hover { border-color: var(--primary); color: var(--primary); }
+    .date-pill.active {
+      background: var(--primary);
+      color: white;
+      border-color: var(--primary);
+    }
+
+    .date-pill .day-name { font-weight: 600; display: block; font-size: 0.8rem; }
+    .date-pill .day-date { display: block; font-size: 0.75rem; }
+
+    /* Slot grid */
+    .slots {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .slot-btn {
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--slot-bg);
+      cursor: pointer;
+      font-size: 0.85rem;
+      text-align: center;
+      transition: all 0.15s;
+    }
+
+    .slot-btn:hover { background: var(--slot-hover); border-color: var(--primary); }
+    .slot-btn.selected {
+      background: var(--slot-selected);
+      color: white;
+      border-color: var(--slot-selected);
+    }
+
+    /* Booking form */
+    .form { display: none; }
+    .form.visible { display: block; }
+
+    .form-group {
+      margin-bottom: 12px;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 500;
+      margin-bottom: 4px;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .form-group input:focus { border-color: var(--primary); }
+
+    .selected-slot-info {
+      background: var(--slot-bg);
+      padding: 12px;
+      border-radius: var(--radius);
+      margin-bottom: 16px;
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+
+    .btn-primary {
+      width: 100%;
+      padding: 12px;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 1rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    /* States */
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: var(--text-muted);
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      border: 3px solid var(--border);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      margin-bottom: 8px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .message {
+      padding: 16px;
+      border-radius: var(--radius);
+      text-align: center;
+      font-size: 0.9rem;
+    }
+
+    .message.success { background: #ecfdf5; color: var(--success); }
+    .message.error { background: #fef2f2; color: var(--error); }
+
+    .empty-state {
+      text-align: center;
+      padding: 32px;
+      color: var(--text-muted);
+    }
+
+    .refresh-note {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-align: center;
+      margin-top: 8px;
+    }
+
+    .tz-note {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1 id="pageTitle">Book a Meeting</h1>
+      <p class="subtitle" id="pageSubtitle">Select an available time slot</p>
+      <p class="tz-note" id="tzNote"></p>
+
+      <!-- Loading -->
+      <div id="loadingState" class="loading">
+        <div class="spinner"></div>
+        <p>Loading availability...</p>
+      </div>
+
+      <!-- Date pills -->
+      <div id="dateSection" style="display:none">
+        <div id="dates" class="dates"></div>
+      </div>
+
+      <!-- Slot grid -->
+      <div id="slotsSection" style="display:none">
+        <div id="slots" class="slots"></div>
+      </div>
+
+      <!-- Empty state -->
+      <div id="emptyState" class="empty-state" style="display:none">
+        No available slots for this day.
+      </div>
+
+      <!-- Booking form -->
+      <div id="bookingForm" class="form">
+        <div class="selected-slot-info" id="selectedSlotInfo"></div>
+        <div class="form-group">
+          <label for="name">Your Name</label>
+          <input type="text" id="name" placeholder="John Doe" required>
+        </div>
+        <div class="form-group">
+          <label for="email">Your Email</label>
+          <input type="email" id="email" placeholder="john@example.com" required>
+        </div>
+        <button class="btn-primary" id="confirmBtn" onclick="submitBooking()">
+          Confirm Booking
+        </button>
+      </div>
+
+      <!-- Result message -->
+      <div id="resultMessage" style="display:none"></div>
+
+      <p class="refresh-note" id="refreshNote" style="display:none">
+        Availability auto-refreshes every 5 minutes
+      </p>
+    </div>
+  </div>
+
+  <script>
+    // State
+    var state = {
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      allSlots: [],
+      selectedDate: null,
+      selectedSlot: null,
+      loading: true,
+      booked: false
+    };
+
+    // Initialize
+    (function init() {
+      document.getElementById('tzNote').textContent =
+        'Times shown in ' + state.timezone;
+      fetchSlots();
+      setInterval(function() {
+        if (!state.booked && document.visibilityState === 'visible') {
+          fetchSlots();
+        }
+      }, 5 * 60 * 1000);
+    })();
+
+    function fetchSlots() {
+      var now = new Date();
+      var end = new Date(now.getTime() + 14 * 86400000);
+
+      google.script.run
+        .withSuccessHandler(onSlotsLoaded)
+        .withFailureHandler(onError)
+        .getAvailableSlots(state.timezone, now.toISOString(), end.toISOString());
+    }
+
+    function onSlotsLoaded(slots) {
+      state.allSlots = slots || [];
+      state.loading = false;
+
+      document.getElementById('loadingState').style.display = 'none';
+      document.getElementById('refreshNote').style.display = 'block';
+
+      if (state.allSlots.length === 0) {
+        document.getElementById('dateSection').style.display = 'none';
+        document.getElementById('slotsSection').style.display = 'none';
+        document.getElementById('emptyState').style.display = 'block';
+        document.getElementById('emptyState').textContent =
+          'No available slots in the next 2 weeks.';
+        return;
+      }
+
+      renderDates();
+
+      if (!state.selectedDate || !state.allSlots.find(function(d) { return d.date === state.selectedDate; })) {
+        selectDate(state.allSlots[0].date);
+      } else {
+        renderSlots();
+      }
+    }
+
+    function onError(err) {
+      state.loading = false;
+      document.getElementById('loadingState').style.display = 'none';
+
+      var msg = document.getElementById('resultMessage');
+      msg.style.display = 'block';
+      msg.className = 'message error';
+      msg.textContent = 'Failed to load availability. Please refresh the page.';
+    }
+
+    function renderDates() {
+      var container = document.getElementById('dates');
+      container.innerHTML = '';
+      document.getElementById('dateSection').style.display = 'block';
+
+      state.allSlots.forEach(function(day) {
+        var pill = document.createElement('div');
+        pill.className = 'date-pill' + (day.date === state.selectedDate ? ' active' : '');
+        pill.innerHTML = '<span class="day-name">' + day.dayLabel.split(',')[0] +
+          '</span><span class="day-date">' + day.dayLabel.split(', ')[1] + '</span>';
+        pill.onclick = function() { selectDate(day.date); };
+        container.appendChild(pill);
+      });
+    }
+
+    function selectDate(date) {
+      state.selectedDate = date;
+      state.selectedSlot = null;
+
+      document.getElementById('bookingForm').className = 'form';
+      renderDates();
+      renderSlots();
+    }
+
+    function renderSlots() {
+      var container = document.getElementById('slots');
+      container.innerHTML = '';
+
+      var dayData = state.allSlots.find(function(d) { return d.date === state.selectedDate; });
+      if (!dayData || !dayData.slots.length) {
+        document.getElementById('slotsSection').style.display = 'none';
+        document.getElementById('emptyState').style.display = 'block';
+        document.getElementById('emptyState').textContent = 'No available slots for this day.';
+        return;
+      }
+
+      document.getElementById('slotsSection').style.display = 'block';
+      document.getElementById('emptyState').style.display = 'none';
+
+      dayData.slots.forEach(function(slot) {
+        var btn = document.createElement('div');
+        btn.className = 'slot-btn' +
+          (state.selectedSlot && state.selectedSlot.start === slot.start ? ' selected' : '');
+        btn.textContent = slot.label;
+        btn.onclick = function() { selectSlot(slot); };
+        container.appendChild(btn);
+      });
+    }
+
+    function selectSlot(slot) {
+      state.selectedSlot = slot;
+      renderSlots();
+
+      var form = document.getElementById('bookingForm');
+      form.className = 'form visible';
+      document.getElementById('selectedSlotInfo').textContent = slot.label;
+      document.getElementById('resultMessage').style.display = 'none';
+    }
+
+    function submitBooking() {
+      var name = document.getElementById('name').value.trim();
+      var email = document.getElementById('email').value.trim();
+
+      if (!name || !email) {
+        showResult('error', 'Please fill in your name and email.');
+        return;
+      }
+
+      if (!state.selectedSlot) {
+        showResult('error', 'Please select a time slot.');
+        return;
+      }
+
+      var btn = document.getElementById('confirmBtn');
+      btn.disabled = true;
+      btn.textContent = 'Booking...';
+
+      google.script.run
+        .withSuccessHandler(onBookingResult)
+        .withFailureHandler(function(err) {
+          btn.disabled = false;
+          btn.textContent = 'Confirm Booking';
+          showResult('error', 'An error occurred. Please try again.');
+        })
+        .bookSlot(
+          state.selectedSlot.start,
+          state.selectedSlot.end,
+          name,
+          email,
+          state.timezone
+        );
+    }
+
+    function onBookingResult(result) {
+      var btn = document.getElementById('confirmBtn');
+      btn.disabled = false;
+      btn.textContent = 'Confirm Booking';
+
+      if (result.success) {
+        state.booked = true;
+        document.getElementById('dateSection').style.display = 'none';
+        document.getElementById('slotsSection').style.display = 'none';
+        document.getElementById('bookingForm').className = 'form';
+        showResult('success', result.message);
+      } else {
+        showResult('error', result.message);
+        fetchSlots();
+      }
+    }
+
+    function showResult(type, text) {
+      var msg = document.getElementById('resultMessage');
+      msg.style.display = 'block';
+      msg.className = 'message ' + type;
+      msg.textContent = text;
+    }
+  </script>
+</body>
+</html>

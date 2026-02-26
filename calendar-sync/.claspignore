@@ -1,0 +1,7 @@
+# Only push these file types to Apps Script
+!**/*.gs
+!**/*.html
+!appsscript.json
+
+# Ignore everything else
+**/*

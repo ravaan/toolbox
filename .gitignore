@@ -1,0 +1,13 @@
+# clasp credentials (contains OAuth refresh tokens)
+.clasprc.json
+
+# Node modules
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
