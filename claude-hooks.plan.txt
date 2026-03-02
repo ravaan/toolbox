@@ -1,0 +1,197 @@
+ Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Plan: Claude Code Notification Sound Hooks
+
+ Context
+
+ Claude Code runs tasks that can take time. When it finishes or needs input, there's no audible
+ notification. This adds notification sounds via Claude Code hooks — a distinct sound for each "waiting for
+  input" event. The solution is a single-file change to settings.json with no external scripts or
+ dependencies.
+
+ Sound Mapping
+
+ ┌─────────────────────┬────────────┬──────────┬────────────────────────────────────────┐
+ │        Event        │   Sound    │ Duration │             When it plays              │
+ ├─────────────────────┼────────────┼──────────┼────────────────────────────────────────┤
+ │ Permission prompt   │ chord.wav  │ 0.65s    │ Claude needs approval to run a tool    │
+ ├─────────────────────┼────────────┼──────────┼────────────────────────────────────────┤
+ │ Question dialog     │ ding.wav   │ 0.4s     │ Claude asks a clarifying question      │
+ ├─────────────────────┼────────────┼──────────┼────────────────────────────────────────┤
+ │ Finished responding │ notify.wav │ 1.29s    │ Claude is done, waiting for next input │
+ └─────────────────────┴────────────┴──────────┴────────────────────────────────────────┘
+
+ What Changes
+
+ Single file modified: ~/.claude/settings.json
+
+ - The existing Stop hook (SystemSounds::Asterisk.Play()) is replaced with notify.wav + .PlaySync() +
+ async: true
+ - Two new Notification hooks are added (permission_prompt with debounce, elicitation_dialog)
+
+ No new files created. No external dependencies.
+
+ Target settings.json
+
+ {
+   "hooks": {
+     "Notification": [
+       {
+         "matcher": "permission_prompt",
+         "hooks": [
+           {
+             "type": "command",
+             "command": "f=/tmp/.claude_perm_sound; [ -f \"$f\" ] && [ $(($(date +%s)-$(stat -c %Y \"$f\"
+ 2>/dev/null || echo 0))) -lt 3 ] && exit 0; touch \"$f\"; powershell.exe -NoProfile -Command \"(New-Object
+  System.Media.SoundPlayer 'C:/WINDOWS/media/chord.wav').PlaySync()\"",
+             "timeout": 10
+           }
+         ]
+       },
+       {
+         "matcher": "elicitation_dialog",
+         "hooks": [
+           {
+             "type": "command",
+             "command": "powershell.exe -NoProfile -Command \"(New-Object System.Media.SoundPlayer
+ 'C:/WINDOWS/media/ding.wav').PlaySync()\"",
+             "timeout": 5
+           }
+         ]
+       }
+     ],
+     "Stop": [
+       {
+         "hooks": [
+           {
+             "type": "command",
+             "command": "powershell.exe -NoProfile -Command \"(New-Object System.Media.SoundPlayer
+ 'C:/WINDOWS/media/notify.wav').PlaySync()\"",
+             "async": true,
+             "timeout": 5
+           }
+         ]
+       }
+     ]
+   },
+   "enabledPlugins": {
+     "voltagent-lang@voltagent-subagents": true,
+     "voltagent-infra@voltagent-subagents": true,
+     "voltagent-core-dev@voltagent-subagents": true,
+     "voltagent-qa-sec@voltagent-subagents": true,
+     "voltagent-data-ai@voltagent-subagents": true,
+     "voltagent-dev-exp@voltagent-subagents": true,
+     "voltagent-domains@voltagent-subagents": true,
+     "voltagent-biz@voltagent-subagents": true,
+     "voltagent-meta@voltagent-subagents": true,
+     "voltagent-research@voltagent-subagents": true
+   },
+   "autoUpdatesChannel": "latest"
+ }
+
+ Implementation Steps
+
+ 1. Back up — cp ~/.claude/settings.json ~/.claude/settings.json.bak && ls -la ~/.claude/settings.json.bak
+ (verify backup exists)
+ 2. Edit settings.json — replace the entire file with the target JSON above
+ 3. Restart Claude Code — hooks are loaded at session startup; existing sessions won't pick up changes
+
+ Design Decisions
+
+ .PlaySync() not .Play()
+
+ .Play() starts a background thread then PowerShell exits, killing the thread before audio plays.
+ .PlaySync() keeps PowerShell alive until the sound finishes. This is safe because:
+ - Stop hook: async: true means Claude doesn't wait
+ - Notification hooks: Non-blocking by design (side-effect only)
+
+ Forward slashes in paths (C:/WINDOWS/media/)
+
+ PowerShell accepts forward slashes. This avoids \\ escaping in JSON, reducing edit errors when changing
+ sounds later.
+
+ -NoProfile on all PowerShell calls
+
+ Skips loading user profile scripts. Without it: ~2.4s latency. With it: ~0.15s.
+
+ 3-second debounce on permission sounds only
+
+ With 10 subagent plugins enabled, multi-agent tasks can fire rapid permission prompts. The bash one-liner
+ checks a temp file timestamp — if a sound played less than 3 seconds ago, it exits silently. Uses stat -c
+ %Y and date +%s (both confirmed working in this Git Bash environment).
+
+ A small TOCTOU race exists: two hooks firing within milliseconds could both play. The consequence is a
+ "double ding" — acceptable, not worth atomic locking complexity.
+
+ async: true on Stop only
+
+ Stop can block the next input prompt from appearing. async: true ensures zero delay. Notification hooks
+ are non-blocking by design so don't need it. (If testing reveals Notification hooks block the
+ permission/question UI, add async: true to those too.)
+
+ Subagent behavior
+
+ - Stop fires only for the main agent (subagent completions use SubagentStop)
+ - Notification fires for all contexts including subagents — this is why debounce exists
+
+ elicitation_dialog uncertainty
+
+ This matcher fires for input dialogs. It should cover AskUserQuestion prompts and MCP tool dialogs. If
+ testing reveals it doesn't fire for some question types, we'll adjust.
+
+ Verification
+
+ Step 0: Preview sounds (run in bash before making changes)
+
+ powershell.exe -NoProfile -Command "(New-Object System.Media.SoundPlayer
+ 'C:/WINDOWS/media/chord.wav').PlaySync()"
+ sleep 1
+ powershell.exe -NoProfile -Command "(New-Object System.Media.SoundPlayer
+ 'C:/WINDOWS/media/ding.wav').PlaySync()"
+ sleep 1
+ powershell.exe -NoProfile -Command "(New-Object System.Media.SoundPlayer
+ 'C:/WINDOWS/media/notify.wav').PlaySync()"
+
+ Post-implementation tests
+
+ 1. Finished — Ask Claude "Say hello". notify.wav plays when response completes.
+ 2. Permission — Ask Claude to create a file. chord.wav plays when permission dialog appears.
+ 3. Debounce — Trigger rapid permission prompts. Only the first plays; next ones within 3s are silent.
+ 4. Question — Give Claude an ambiguous task. ding.wav plays when question dialog appears.
+ 5. Non-blocking — Input prompt appears immediately after Stop, no delay.
+
+ Troubleshooting
+
+ - No sound? Check Windows volume, audio output device. Verify files: ls
+ C:/WINDOWS/media/{chord,ding,notify}.wav
+ - No sound after config edit? Restart Claude Code. Hooks load at session start.
+ - Debounce not working? Check /tmp/.claude_perm_sound exists: ls -la /tmp/.claude_perm_sound
+
+ Rollback
+
+ cp ~/.claude/settings.json.bak ~/.claude/settings.json
+ Then restart Claude Code.
+
+ Risks
+
+ ┌─────────────────────────────────────┬─────────────────────┬─────────────────────────────────────────┐
+ │                Risk                 │       Impact        │               Mitigation                │
+ ├─────────────────────────────────────┼─────────────────────┼─────────────────────────────────────────┤
+ │ .wav files missing                  │ Silence             │ Verify before editing; these are        │
+ │                                     │                     │ standard Windows 10/11 files            │
+ ├─────────────────────────────────────┼─────────────────────┼─────────────────────────────────────────┤
+ │ PowerShell cold-start slow (~3s     │ Delayed sound       │ timeout: 10 for debounce hook           │
+ │ first run)                          │                     │ accommodates JIT                        │
+ ├─────────────────────────────────────┼─────────────────────┼─────────────────────────────────────────┤
+ │ Audio device unavailable            │ Silence             │ Hook exits non-zero, Claude continues   │
+ │                                     │                     │ normally                                │
+ ├─────────────────────────────────────┼─────────────────────┼─────────────────────────────────────────┤
+ │ elicitation_dialog doesn't fire for │ Missing ding for    │ Test and adjust post-implementation     │
+ │  all question types                 │ some questions      │                                         │
+ ├─────────────────────────────────────┼─────────────────────┼─────────────────────────────────────────┤
+ │ JSON syntax error after manual edit │ Hooks don't load    │ Validate JSON before restarting; backup │
+ │                                     │                     │  available for rollback                 │
+ ├─────────────────────────────────────┼─────────────────────┼─────────────────────────────────────────┤
+ │ Rapid permission sounds from        │ Sound spam          │ 3-second debounce prevents this         │
+ │ subagents                           │                     │                                         │
+ └─────────────────────────────────────┴─────────────────────┴─────────────────────────────────────────┘

@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:developers.google.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(cd:*)",
+      "Bash(python:*)",
+      "Bash(node:*)",
+      "Bash(docker:*)",
+      "Bash(claude:*)",
+      "Bash(git:*)",
+      "Bash(echo Shell: $SHELL:*)",
+      "Bash(wsl:*)",
+      "Bash(echo HOME=$HOME:*)",
+      "Bash(date:*)",
+      "Bash(ls:*)",
+      "Bash(npm view:*)",
+      "Bash(npm pack:*)",
+      "Bash(curl:*)",
+      "Bash(bash:*)",
+      "Bash(command:*)",
+      "Bash(\"/c/Program Files/Git/bin/bash.exe\":*)",
+      "Bash(sed:*)",
+      "Bash(MSYS_NO_PATHCONV=1 docker image:*)",
+      "Bash(MSYS_NO_PATHCONV=1 docker exec:*)",
+      "Bash(netstat:*)",
+      "Bash(cp:*)",
+      "Bash(docker ps:*)",
+      "Bash(MSYS_NO_PATHCONV=1 docker inspect:*)",
+      "Bash(python3:*)",
+      "Bash(npm root:*)",
+      "Bash(MSYS_NO_PATHCONV=1 docker run:*)"
+    ]
+  }
+}

@@ -1,0 +1,498 @@
+#!/bin/bash
+set -e
+
+# claude-box — Run Claude Code inside Docker with --dangerously-skip-permissions
+# Usage: claude-box [command] [args]
+
+IMAGE="claude-box:latest"
+DEV_DIR="$HOME/Documents/dev"
+LABEL="com.claude-box"
+
+# ─── Helpers ────────────────────────────────────────────────────────────────────
+
+# Convert path to Windows format for Docker Desktop (Git Bash gives /c/Users/...)
+win_path() {
+    if command -v cygpath &>/dev/null; then
+        cygpath -w "$1"
+    else
+        echo "$1"
+    fi
+}
+
+# Wrap docker calls to prevent MSYS/Git Bash from mangling non-path arguments
+docker_cmd() {
+    MSYS_NO_PATHCONV=1 command docker "$@"
+}
+
+# Run docker exec with winpty if in Git Bash (mintty doesn't provide a TTY)
+docker_exec_tty() {
+    if [ -n "$MSYSTEM" ]; then
+        winpty docker exec -it "$@"
+    else
+        MSYS_NO_PATHCONV=1 command docker exec -it "$@"
+    fi
+}
+
+# Collision-proof container name: claude-box-{dirname}-{path_hash}
+get_container_name() {
+    local dir="$1"
+    local base
+    base=$(basename "$dir")
+    local hash
+    hash=$(printf '%s' "$dir" | md5sum | cut -c1-8)
+    echo "claude-box-${base}-${hash}"
+}
+
+container_exists() {
+    docker_cmd ps -a --format '{{.Names}}' | grep -q "^${1}$"
+}
+
+container_running() {
+    docker_cmd ps --format '{{.Names}}' | grep -q "^${1}$"
+}
+
+# ─── Port Detection ─────────────────────────────────────────────────────────────
+
+# Scan project directory to auto-detect which ports it uses
+detect_ports() {
+    local project_dir="$1"
+    local ports=()
+
+    # 1. .env files: PORT=XXXX
+    while IFS= read -r line; do
+        local port
+        port=$(echo "$line" | grep -oE '[0-9]+')
+        [ -n "$port" ] && ports+=("$port")
+    done < <(grep -rhE '^\s*PORT\s*=' "$project_dir"/.env "$project_dir"/.env.local "$project_dir"/*/.env 2>/dev/null)
+
+    # 2. vite.config.*: port: XXXX
+    while IFS= read -r line; do
+        local port
+        port=$(echo "$line" | grep -oE '[0-9]+')
+        [ -n "$port" ] && ports+=("$port")
+    done < <(grep -rhE 'port\s*:\s*[0-9]+' "$project_dir"/vite.config.* "$project_dir"/*/vite.config.* 2>/dev/null)
+
+    # 3. Proxy targets in vite config: localhost:XXXX
+    while IFS= read -r line; do
+        local port
+        port=$(echo "$line" | grep -oE 'localhost:([0-9]+)' | grep -oE '[0-9]+')
+        [ -n "$port" ] && ports+=("$port")
+    done < <(grep -rhE 'localhost:[0-9]+' "$project_dir"/vite.config.* "$project_dir"/*/vite.config.* 2>/dev/null)
+
+    # 4. package.json --port flags
+    while IFS= read -r line; do
+        local port
+        port=$(echo "$line" | grep -oE '\-\-port\s+[0-9]+' | grep -oE '[0-9]+')
+        [ -n "$port" ] && ports+=("$port")
+    done < <(grep -rhE '\-\-port\s+[0-9]+' "$project_dir"/package.json "$project_dir"/*/package.json 2>/dev/null)
+
+    # Deduplicate and output
+    if [ ${#ports[@]} -gt 0 ]; then
+        printf '%s\n' "${ports[@]}" | sort -un
+    fi
+}
+
+# Track ports already allocated in this launch session to avoid duplicates
+ALLOCATED_PORTS=()
+FOUND_PORT=""
+
+# Find a free port starting from the given port, incrementing up to 20 times.
+# Sets FOUND_PORT global (NOT echo) to avoid subshell losing ALLOCATED_PORTS state.
+find_free_port() {
+    FOUND_PORT=""
+    local port="$1"
+    local max_tries=20
+    for ((i=0; i<max_tries; i++)); do
+        local in_use=false
+        # Check if port is listening on host (covers other containers too)
+        if netstat -ano 2>/dev/null | grep -q ":${port}.*LISTENING"; then
+            in_use=true
+        fi
+        # Check ports already handed out in this session
+        for ap in "${ALLOCATED_PORTS[@]}"; do
+            [ "$ap" = "$port" ] && in_use=true
+        done
+        if ! $in_use; then
+            ALLOCATED_PORTS+=("$port")
+            FOUND_PORT="$port"
+            return 0
+        fi
+        ((port++))
+    done
+    return 1
+}
+
+# ─── Preflight ──────────────────────────────────────────────────────────────────
+
+preflight_checks() {
+    # Docker running?
+    if ! docker_cmd info &>/dev/null; then
+        echo "Error: Docker Desktop is not running. Please start it and try again."
+        exit 1
+    fi
+
+    # Image exists? Auto-build on first run.
+    if ! docker_cmd image inspect "$IMAGE" &>/dev/null; then
+        echo "First run — building claude-box image (this takes a few minutes)..."
+        do_build
+    fi
+
+    # Image stale? Warn after 14 days.
+    local built_at
+    built_at=$(docker_cmd inspect --format '{{index .Config.Labels "claude-box.built-at"}}' "$IMAGE" 2>/dev/null || true)
+    if [ -n "$built_at" ] && [ "$built_at" != "unknown" ]; then
+        local now
+        now=$(date +%s)
+        local built
+        built=$(date -d "$built_at" +%s 2>/dev/null || echo "$now")
+        local days=$(( (now - built) / 86400 ))
+        if [ "$days" -gt 14 ]; then
+            echo "WARNING: claude-box image is ${days} days old. Run 'claude-box build' to update."
+        fi
+    fi
+}
+
+# ─── Build ──────────────────────────────────────────────────────────────────────
+
+do_build() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    # If we're running from ~/.local/bin, the Dockerfile is in the original source dir
+    local build_dir="$script_dir"
+    if [ ! -f "$build_dir/Dockerfile" ]; then
+        # Try the toolbox location
+        build_dir="$DEV_DIR/toolbox/claude-box"
+    fi
+    if [ ! -f "$build_dir/Dockerfile" ]; then
+        echo "Error: Cannot find Dockerfile. Expected at: $build_dir/Dockerfile"
+        exit 1
+    fi
+
+    # Convert to Windows path for Docker Desktop
+    local docker_build_dir="$build_dir"
+    if command -v cygpath &>/dev/null; then
+        docker_build_dir="$(cygpath -w "$build_dir")"
+    fi
+
+    docker_cmd build \
+        --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        -t "$IMAGE" "$docker_build_dir"
+}
+
+# ─── Launch ─────────────────────────────────────────────────────────────────────
+
+launch() {
+    local project_dir="$1"
+    local container
+    container=$(get_container_name "$project_dir")
+    ALLOCATED_PORTS=()
+
+    preflight_checks
+
+    if container_exists "$container"; then
+        # Start if stopped
+        if ! docker_cmd start "$container" 2>/tmp/claude-box-err.log; then
+            local err
+            err=$(cat /tmp/claude-box-err.log 2>/dev/null)
+            rm -f /tmp/claude-box-err.log
+            if echo "$err" | grep -qi "port\|bind\|address\|permitted"; then
+                echo "WARNING: Port conflict on existing container. Recreating with fresh ports."
+                docker_cmd rm -f "$container" 2>/dev/null || true
+                # Will fall through to create below
+            else
+                echo "Error starting container: $err"
+                exit 1
+            fi
+        fi
+    fi
+
+    if ! container_exists "$container"; then
+        # Volume mounts (host paths need Windows format for Docker Desktop)
+        local mounts=(
+            -v "$(win_path "$project_dir"):/workspace"
+            -v "$(win_path "$HOME/.claude"):/home/claude/.claude"
+        )
+
+        # Mount SSH keys if available
+        if [ -d "$HOME/.ssh" ]; then
+            mounts+=(-v "$(win_path "$HOME/.ssh"):/mnt/ssh-host:ro")
+        fi
+
+        # Mount gitconfig if available
+        if [ -f "$HOME/.gitconfig" ]; then
+            mounts+=(-v "$(win_path "$HOME/.gitconfig"):/mnt/gitconfig-host:ro")
+        fi
+
+        # Mount .claude.json (app state with login info) if available
+        if [ -f "$HOME/.claude.json" ]; then
+            mounts+=(-v "$(win_path "$HOME/.claude.json"):/mnt/claude-config-host:ro")
+        fi
+
+        # Environment variables
+        local env_args=()
+        if [ -n "$ANTHROPIC_API_KEY" ]; then
+            env_args+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+        fi
+
+        # Dynamic port detection
+        local detected
+        detected=$(detect_ports "$project_dir")
+
+        local port_args=()
+        if [ -n "$detected" ]; then
+            echo "Detected project ports: $(echo $detected | tr '\n' ' ')"
+            while read -r container_port; do
+                find_free_port "$container_port" || true
+                if [ -n "$FOUND_PORT" ]; then
+                    port_args+=(-p "127.0.0.1:${FOUND_PORT}:${container_port}")
+                    if [ "$FOUND_PORT" != "$container_port" ]; then
+                        echo "  Port $container_port -> host:$FOUND_PORT (original in use)"
+                    else
+                        echo "  Port $container_port -> host:$FOUND_PORT"
+                    fi
+                else
+                    echo "  Port $container_port -> SKIPPED (no free port in range)"
+                fi
+            done <<< "$detected"
+        else
+            echo "No project ports detected. Mapping defaults: 3000, 5173, 8080"
+            for p in 3000 5173 8080; do
+                find_free_port "$p" || true
+                if [ -n "$FOUND_PORT" ]; then
+                    port_args+=(-p "127.0.0.1:${FOUND_PORT}:${p}")
+                fi
+            done
+        fi
+
+        # Create the container
+        if ! docker_cmd run -d \
+            --name "$container" \
+            --label "$LABEL=true" \
+            --memory=8g \
+            --cpus=4 \
+            --pids-limit=512 \
+            --cap-drop=ALL \
+            --cap-add=CHOWN \
+            --cap-add=SETUID \
+            --cap-add=SETGID \
+            --cap-add=NET_BIND_SERVICE \
+            --security-opt=no-new-privileges \
+            "${mounts[@]}" \
+            "${env_args[@]}" \
+            "${port_args[@]}" \
+            "$IMAGE" 2>/tmp/claude-box-err.log; then
+
+            echo "Error creating container:"
+            cat /tmp/claude-box-err.log
+            rm -f /tmp/claude-box-err.log
+            exit 1
+        fi
+        rm -f /tmp/claude-box-err.log
+
+        echo "Container '$container' created."
+    fi
+
+    echo "Launching Claude Code (--dangerously-skip-permissions)..."
+    docker_exec_tty "$container" claude --dangerously-skip-permissions
+}
+
+# ─── Commands ───────────────────────────────────────────────────────────────────
+
+cmd_new() {
+    local name="$1"
+
+    if [ -z "$name" ]; then
+        echo "Usage: claude-box new <project-name>"
+        exit 1
+    fi
+
+    # Validate project name
+    if echo "$name" | grep -qE '[^a-zA-Z0-9._-]'; then
+        echo "Error: Project name can only contain letters, numbers, dots, hyphens, and underscores."
+        exit 1
+    fi
+
+    local project_dir="$DEV_DIR/$name"
+
+    if [ -d "$project_dir" ]; then
+        echo "Directory '$project_dir' already exists. Launching into it."
+    else
+        mkdir -p "$project_dir"
+        echo "Created project: $project_dir"
+    fi
+
+    launch "$project_dir"
+}
+
+cmd_shell() {
+    local project_dir="${1:-$PWD}"
+    local container
+    container=$(get_container_name "$project_dir")
+
+    if ! container_exists "$container"; then
+        echo "Error: No container for this project. Run 'claude-box' first to create one."
+        exit 1
+    fi
+
+    docker_cmd start "$container" 2>/dev/null || true
+    docker_exec_tty "$container" bash
+}
+
+cmd_stop() {
+    local name="$1"
+    local container
+
+    if [ -n "$name" ]; then
+        # Find container by partial name
+        container=$(docker_cmd ps --filter "label=$LABEL=true" --format '{{.Names}}' | grep "$name" | head -1)
+        if [ -z "$container" ]; then
+            echo "Error: No running claude-box container matching '$name'."
+            echo "Run 'claude-box ls' to see all containers."
+            exit 1
+        fi
+    else
+        container=$(get_container_name "$PWD")
+    fi
+
+    if container_running "$container"; then
+        docker_cmd stop "$container"
+        echo "Stopped: $container"
+    else
+        echo "Container '$container' is not running."
+    fi
+}
+
+cmd_rm() {
+    local name="$1"
+    local force="$2"
+    local container
+
+    if [ -n "$name" ] && [ "$name" != "--force" ]; then
+        container=$(docker_cmd ps -a --filter "label=$LABEL=true" --format '{{.Names}}' | grep "$name" | head -1)
+        if [ -z "$container" ]; then
+            echo "Error: No claude-box container matching '$name'."
+            exit 1
+        fi
+    else
+        container=$(get_container_name "$PWD")
+        [ "$name" = "--force" ] && force="--force"
+    fi
+
+    if ! container_exists "$container"; then
+        echo "Error: Container '$container' does not exist."
+        exit 1
+    fi
+
+    if container_running "$container" && [ "$force" != "--force" ]; then
+        echo "Error: Container '$container' is still running."
+        echo "Stop it first with 'claude-box stop' or use 'claude-box rm --force'."
+        exit 1
+    fi
+
+    echo "This will remove the container '$container'."
+    echo "Your project files are NOT affected (they live on your host filesystem)."
+    echo "Container-local state (Claude history inside Docker, installed tools) will be lost."
+    read -r -p "Proceed? [y/N] " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        docker_cmd rm -f "$container"
+        echo "Removed: $container"
+    else
+        echo "Cancelled."
+    fi
+}
+
+cmd_ls() {
+    echo "Claude-Box Containers:"
+    echo ""
+    docker_cmd ps -a \
+        --filter "label=$LABEL=true" \
+        --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+}
+
+cmd_clean() {
+    local stopped
+    stopped=$(docker_cmd ps -a --filter "label=$LABEL=true" --filter "status=exited" --format '{{.Names}}')
+
+    if [ -z "$stopped" ]; then
+        echo "No stopped claude-box containers to clean up."
+        return
+    fi
+
+    echo "The following stopped containers will be removed:"
+    echo "$stopped"
+    echo ""
+    read -r -p "Proceed? [y/N] " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        echo "$stopped" | while read -r name; do
+            docker_cmd rm "$name"
+            echo "Removed: $name"
+        done
+    else
+        echo "Cancelled."
+    fi
+}
+
+cmd_help() {
+    cat <<'HELP'
+claude-box — Run Claude Code inside Docker with full permissions
+
+Usage:
+  claude-box                Launch Claude Code for the current directory
+  claude-box new <name>     Create a new project in ~/Documents/dev/<name> and launch
+  claude-box shell          Open a bash shell in the current project's container
+  claude-box stop [name]    Stop a running container (defaults to current dir)
+  claude-box rm [name]      Remove a container (with confirmation)
+  claude-box ls             List all claude-box containers
+  claude-box build          Rebuild the Docker image (updates Claude Code)
+  claude-box clean          Remove all stopped claude-box containers
+  claude-box help           Show this help message
+
+Environment:
+  ANTHROPIC_API_KEY         If set, passed to the container as an alternative to OAuth
+
+Notes:
+  - Containers are long-lived: installed tools persist across sessions
+  - Only one container can use the default ports at a time
+  - Project files are bind-mounted; changes are instant and bidirectional
+  - Claude Code runs with --dangerously-skip-permissions inside the container
+HELP
+}
+
+# ─── Main ───────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    new)
+        cmd_new "$2"
+        ;;
+    shell)
+        cmd_shell "$PWD"
+        ;;
+    stop)
+        cmd_stop "$2"
+        ;;
+    rm)
+        cmd_rm "$2" "$3"
+        ;;
+    ls)
+        cmd_ls
+        ;;
+    build)
+        do_build
+        echo "Build complete."
+        ;;
+    clean)
+        cmd_clean
+        ;;
+    help|--help|-h)
+        cmd_help
+        ;;
+    "")
+        launch "$PWD"
+        ;;
+    *)
+        echo "Unknown command: $1"
+        echo "Run 'claude-box help' for usage."
+        exit 1
+        ;;
+esac
