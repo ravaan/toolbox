@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # - build-essential for native npm addons
 # - tini for proper PID 1 (signal forwarding + zombie reaping)
 # - dos2unix to fix Windows CRLF in copied scripts
-# - Claude Code CLI for AI-assisted development
+# Note: Claude Code CLI runs on the HOST, not in the container
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates curl git jq unzip openssh-client \
@@ -16,7 +16,6 @@ RUN apt-get update && \
       build-essential dos2unix tini && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
-    npm install -g @anthropic-ai/claude-code && \
     npm cache clean --force && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /root/.npm /tmp/*
