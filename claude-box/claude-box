@@ -161,7 +161,7 @@ CMD="$*"
 # --- Strip host snapshot source ---
 # Claude Code prepends: source '/tmp/snapshot-xxx' && shopt -u extglob 2>/dev/null || true &&
 # This is host shell state — meaningless in Docker
-CMD=$(echo "$CMD" | sed "s|source '/tmp/[^']*' && shopt -u extglob 2>/dev/null || true && ||")
+CMD=$(echo "$CMD" | sed "s#source '/tmp/[^']*' && shopt -u extglob 2>/dev/null || true && ##")
 
 # --- Handle CWD tracking ---
 # Claude Code appends: && pwd -P >| '/tmp/claude-pwd-yyy'
@@ -172,7 +172,7 @@ DOCKER_CWD_FILE="/tmp/_claude_box_cwd"
 if [[ "$CMD" =~ \&\&\ pwd\ -P\ \>\|\ \'(/tmp/claude-pwd-[^\']+)\' ]]; then
     CWD_FILE="${BASH_REMATCH[1]}"
     # Replace host CWD file path with Docker-internal file in the command
-    CMD=$(echo "$CMD" | sed "s|pwd -P >| '/tmp/claude-pwd-[^']*'|pwd -P >| '${DOCKER_CWD_FILE}'|")
+    CMD=$(echo "$CMD" | sed "s#pwd -P >| '/tmp/claude-pwd-[^']*'#pwd -P >| '${DOCKER_CWD_FILE}'#")
 fi
 
 # --- Path translation helpers ---
