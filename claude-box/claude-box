@@ -183,9 +183,12 @@ CMD=$(echo "$CMD" | sed 's# \\< /dev/null##')
 # Extract the host CWD file path, redirect pwd to a Docker-internal file instead.
 CWD_FILE=""
 DOCKER_CWD_FILE="/tmp/_claude_box_cwd"
-if [[ "$CMD" =~ \&\&\ pwd\ -P\ \>\|\ ([^ ]+)$ ]]; then
-    CWD_FILE="${BASH_REMATCH[1]}"
-    CMD=$(echo "$CMD" | sed "s# && pwd -P >| [^ ]*\$# && pwd -P >| '${DOCKER_CWD_FILE}'#")
+# Extract CWD file path (everything after last ">| ")
+CWD_FILE=$(echo "$CMD" | grep -o '>| [^ ]*$' | cut -d' ' -f2)
+if [ -n "$CWD_FILE" ]; then
+    # Remove the entire "&& pwd -P >| <path>" suffix and append our own
+    CMD=$(echo "$CMD" | sed 's# && pwd -P >|.*$##')
+    CMD="$CMD && pwd -P >| '${DOCKER_CWD_FILE}'"
     log "cwd tracking: $CWD_FILE"
 fi
 
