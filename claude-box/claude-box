@@ -156,22 +156,37 @@ LOG="__LOG_FILE__"
 
 # Debug logging (check with: cat /tmp/claude-box-proxy.log)
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" >> "$LOG" 2>/dev/null; }
-log "--- invoked: $0 $*"
 
-# The full command string from Claude Code is passed as: proxy_script -c "command_string"
-shift  # skip "-c"
-CMD="$*"
-log "raw CMD: $CMD"
+# Claude Code passes the command in one of two forms:
+#   proxy -c "command_string"     (single argument after -c)
+#   proxy "full command string"   (from .cmd wrapper)
+# Detect and handle both.
+if [ "$1" = "-c" ]; then
+    shift
+    CMD="$*"
+else
+    CMD="$*"
+fi
+log "--- raw CMD: $CMD"
 
-# --- Strip host snapshot source ---
-CMD=$(echo "$CMD" | sed "s#source '/tmp/[^']*' && shopt -u extglob 2>/dev/null || true && ##")
+# --- Strip host snapshot/shopt preamble ---
+# Claude Code prepends: source <snapshot> && { shopt ... || setopt ... } >/dev/null 2>&1 || true &&
+# This is host shell state — meaningless in Docker. Strip everything up to the first eval.
+CMD=$(echo "$CMD" | sed 's#^source [^ ]* && { shopt[^}]*} >/dev/null 2>&1 || true && ##')
+# Also handle the older format
+CMD=$(echo "$CMD" | sed "s#^source '[^']*' && shopt -u extglob 2>/dev/null || true && ##")
+# Strip \< /dev/null that Claude Code adds for stdin isolation
+CMD=$(echo "$CMD" | sed 's# \\< /dev/null##')
 
 # --- Handle CWD tracking ---
+# Claude Code appends: && pwd -P >| <path>
+# Extract the host CWD file path, redirect pwd to a Docker-internal file instead.
 CWD_FILE=""
 DOCKER_CWD_FILE="/tmp/_claude_box_cwd"
-if [[ "$CMD" =~ \&\&\ pwd\ -P\ \>\|\ \'(/tmp/claude-pwd-[^\']+)\' ]]; then
+if [[ "$CMD" =~ \&\&\ pwd\ -P\ \>\|\ ([^ ]+)$ ]]; then
     CWD_FILE="${BASH_REMATCH[1]}"
-    CMD=$(echo "$CMD" | sed "s#pwd -P >| '/tmp/claude-pwd-[^']*'#pwd -P >| '${DOCKER_CWD_FILE}'#")
+    CMD=$(echo "$CMD" | sed "s# && pwd -P >| [^ ]*\$# && pwd -P >| '${DOCKER_CWD_FILE}'#")
+    log "cwd tracking: $CWD_FILE"
 fi
 
 # --- Path translation helpers ---
@@ -227,15 +242,21 @@ PROXY_SCRIPT
     chmod +x "$script_path"
 
     # Generate .cmd wrapper for Windows — Node.js can't execute bash scripts directly
+    # Claude Code passes the full command as positional args (not -c "string").
+    # The .cmd wrapper collects all args and passes them as a single string to bash.
     local cmd_wrapper="${script_path}.cmd"
     local win_script_path
     win_script_path=$(cygpath -w "$script_path" 2>/dev/null || echo "$script_path")
 
-    # Find bash.exe path
     local bash_exe
     bash_exe=$(cygpath -w "$(command -v bash)" 2>/dev/null || echo "C:\\Program Files\\Git\\bin\\bash.exe")
 
-    printf '@"%s" "%s" %%*\r\n' "$bash_exe" "$win_script_path" > "$cmd_wrapper"
+    cat > "$cmd_wrapper" << CMDWRAPPER
+@echo off
+"${bash_exe}" "${win_script_path}" %*
+CMDWRAPPER
+    # Ensure CRLF for .cmd
+    sed -i 's/$/\r/' "$cmd_wrapper" 2>/dev/null || true
 }
 
 # ─── Preflight ──────────────────────────────────────────────────────────────────
