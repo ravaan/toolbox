@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "=== claude-box installer ==="
 echo ""
 
-# Check Docker is available
+# Check prerequisites
 if ! command -v docker &>/dev/null; then
     echo "Error: Docker is not installed. Please install Docker Desktop first."
     exit 1
@@ -14,6 +14,11 @@ fi
 
 if ! docker info &>/dev/null; then
     echo "Error: Docker Desktop is not running. Please start it and try again."
+    exit 1
+fi
+
+if ! command -v npx &>/dev/null; then
+    echo "Error: npx not found. Install Node.js 18+ (https://nodejs.org/)."
     exit 1
 fi
 
@@ -38,7 +43,7 @@ cp "$SCRIPT_DIR/claude-box.cmd" "$INSTALL_DIR/claude-box.cmd"
 sed -i 's/\r$//' "$INSTALL_DIR/claude-box"
 chmod +x "$INSTALL_DIR/claude-box"
 
-echo "Installed 'claude-box' to $INSTALL_DIR/claude-box"
+echo "Installed 'claude-box' to $INSTALL_DIR/"
 
 # Verify it's in PATH
 if command -v claude-box &>/dev/null; then
@@ -47,7 +52,7 @@ if command -v claude-box &>/dev/null; then
     echo ""
     echo "Usage:"
     echo "  cd ~/Documents/dev/your-project"
-    echo "  claude-box                    # Launch Claude Code in Docker"
+    echo "  claude-box                    # Launch Claude Code with Docker sandbox"
     echo "  claude-box new my-app         # Create new project + launch"
     echo "  claude-box help               # See all commands"
 else

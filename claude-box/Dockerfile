@@ -3,20 +3,23 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Single layer: all tools installed, caches cleaned
+# - Git 2.48+ from PPA (for worktree.useRelativePaths support)
 # - Node.js 22 LTS for JS/TS projects
 # - Python 3 for Python projects
 # - build-essential for native npm addons
 # - tini for proper PID 1 (signal forwarding + zombie reaping)
 # - dos2unix to fix Windows CRLF in copied scripts
-# - Claude Code CLI for AI-assisted development
+# Note: Claude Code CLI runs on the HOST, not in the container
 RUN apt-get update && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:git-core/ppa && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates curl git jq unzip openssh-client \
       python3 python3-pip python3-venv \
       build-essential dos2unix tini && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
-    npm install -g @anthropic-ai/claude-code && \
     npm cache clean --force && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /root/.npm /tmp/*
