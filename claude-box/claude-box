@@ -209,19 +209,18 @@ container_to_host_path() {
 WORK_DIR=$(host_to_container_path "$PWD")
 
 # --- Execute in Docker ---
-# Pass command via stdin to avoid quoting issues with double quotes in commands
-printf '%s' "$CMD" | MSYS_NO_PATHCONV=1 command docker exec -i -w "$WORK_DIR" "$CONTAINER" bash
+MSYS_NO_PATHCONV=1 command docker exec -i -w "$WORK_DIR" "$CONTAINER" bash -c "$CMD"
 EXIT_CODE=$?
 
 # --- CWD tracking ---
 # Read the Docker-internal CWD file, translate path, write to host CWD file
 if [ -n "$CWD_FILE" ]; then
-    DOCKER_CWD=$(MSYS_NO_PATHCONV=1 command docker exec -i "$CONTAINER" cat "$DOCKER_CWD_FILE" 2>/dev/null | tr -d '\r\n')
+    DOCKER_CWD=$(MSYS_NO_PATHCONV=1 command docker exec "$CONTAINER" cat "$DOCKER_CWD_FILE" 2>/dev/null | tr -d '\r\n')
     if [ -n "$DOCKER_CWD" ]; then
         HOST_CWD=$(container_to_host_path "$DOCKER_CWD")
         printf '%s\n' "$HOST_CWD" >| "$CWD_FILE"
     fi
-    MSYS_NO_PATHCONV=1 command docker exec -i "$CONTAINER" rm -f "$DOCKER_CWD_FILE" 2>/dev/null || true
+    MSYS_NO_PATHCONV=1 command docker exec "$CONTAINER" rm -f "$DOCKER_CWD_FILE" 2>/dev/null || true
 fi
 
 exit $EXIT_CODE
