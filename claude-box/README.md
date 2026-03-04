@@ -157,15 +157,27 @@ claude-box shares your host's Claude Code login. No need to re-authenticate insi
 
 Alternatively, set `ANTHROPIC_API_KEY` as an environment variable and it will be passed into the container.
 
+## Worktree Support
+
+Claude Code's built-in worktree feature (`/worktree` command, `--worktree` flag, and agent `isolation: "worktree"`) works out of the box. Worktrees are created at `.claude/worktrees/<name>/` inside your project directory.
+
+**How it works:** Git worktrees create a `.git` text file with a `gitdir:` pointer back to the main repository. Since git commands run inside Docker but Claude Code reads files from the host, absolute paths would break. The container uses git 2.48+ with `worktree.useRelativePaths true`, which writes relative paths that work on both sides of the bind mount.
+
+**Notes:**
+- Only worktrees inside the project directory are supported (the default `.claude/worktrees/` location)
+- Add `.claude/worktrees/` to your project's `.gitignore` to avoid tracking worktree contents
+- When git 2.48 creates a worktree with relative paths, it sets `extensions.relativeWorktrees=true` in `.git/config`. This requires git 2.48+ for all users of the repository. Git for Windows ships 2.48+ as of early 2025.
+
 ## Docker Image
 
 The Docker image ships with:
 
 - Ubuntu 24.04 LTS
+- Git 2.48+ (from `ppa:git-core/ppa`, for worktree relative paths)
 - Node.js 22 LTS
 - Python 3 + pip + venv
 - build-essential (gcc, make — for native npm addons)
-- git, curl, jq, unzip, openssh-client
+- curl, jq, unzip, openssh-client
 - tini (proper PID 1 for signal handling)
 
 Need something else? `claude-box shell` into the container and install it — it persists until the container is removed.

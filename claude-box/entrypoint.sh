@@ -28,6 +28,7 @@ if [ -f /mnt/gitconfig-host ]; then
 fi
 git config --global core.autocrlf input
 git config --global safe.directory /workspace
+git config --global worktree.useRelativePaths true
 
 # --- Claude Code Config ---
 # .claude.json holds app state (login account, preferences).
