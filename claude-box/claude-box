@@ -142,8 +142,8 @@ generate_proxy_script() {
     local container="$2"
     local project_dir="$3"
 
-    # Get the host project dir in POSIX form (Git Bash gives /c/Users/...)
     local posix_project_dir="$project_dir"
+    local log_file="/tmp/claude-box-proxy.log"
 
     cat > "$script_path" << 'PROXY_SCRIPT'
 #!/bin/bash
@@ -152,73 +152,66 @@ generate_proxy_script() {
 
 CONTAINER="__CONTAINER__"
 PROJECT_DIR="__PROJECT_DIR__"
+LOG="__LOG_FILE__"
+
+# Debug logging (check with: cat /tmp/claude-box-proxy.log)
+log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" >> "$LOG" 2>/dev/null; }
+log "--- invoked: $0 $*"
 
 # The full command string from Claude Code is passed as: proxy_script -c "command_string"
-# We only care about the command string (the -c argument)
 shift  # skip "-c"
 CMD="$*"
+log "raw CMD: $CMD"
 
 # --- Strip host snapshot source ---
-# Claude Code prepends: source '/tmp/snapshot-xxx' && shopt -u extglob 2>/dev/null || true &&
-# This is host shell state — meaningless in Docker
 CMD=$(echo "$CMD" | sed "s#source '/tmp/[^']*' && shopt -u extglob 2>/dev/null || true && ##")
 
 # --- Handle CWD tracking ---
-# Claude Code appends: && pwd -P >| '/tmp/claude-pwd-yyy'
-# This must run INSIDE Docker (same bash session, so cd effects are visible).
-# We redirect it to a Docker-internal temp file, then read it back and translate.
 CWD_FILE=""
 DOCKER_CWD_FILE="/tmp/_claude_box_cwd"
 if [[ "$CMD" =~ \&\&\ pwd\ -P\ \>\|\ \'(/tmp/claude-pwd-[^\']+)\' ]]; then
     CWD_FILE="${BASH_REMATCH[1]}"
-    # Replace host CWD file path with Docker-internal file in the command
     CMD=$(echo "$CMD" | sed "s#pwd -P >| '/tmp/claude-pwd-[^']*'#pwd -P >| '${DOCKER_CWD_FILE}'#")
 fi
 
 # --- Path translation helpers ---
 host_to_container_path() {
-    local host_path="$1"
-    host_path="${host_path%/}"
+    local host_path="${1%/}"
     local project="${PROJECT_DIR%/}"
-
     if [[ "$host_path" == "$project"* ]]; then
         local relative="${host_path#$project}"
-        if [ -z "$relative" ]; then
-            echo "/workspace"
-        else
-            echo "/workspace${relative}"
-        fi
+        [ -z "$relative" ] && echo "/workspace" || echo "/workspace${relative}"
     else
         echo "/workspace"
     fi
 }
 
 container_to_host_path() {
-    local container_path="$1"
-    container_path="${container_path%/}"
-
+    local container_path="${1%/}"
     if [[ "$container_path" == "/workspace"* ]]; then
-        local relative="${container_path#/workspace}"
-        echo "${PROJECT_DIR%/}${relative}"
+        echo "${PROJECT_DIR%/}${container_path#/workspace}"
     else
         echo "${PROJECT_DIR}"
     fi
 }
 
-# Determine the working directory for docker exec
 WORK_DIR=$(host_to_container_path "$PWD")
+log "CMD: $CMD"
+log "WORK_DIR: $WORK_DIR  CONTAINER: $CONTAINER  CWD_FILE: $CWD_FILE"
 
 # --- Execute in Docker ---
-MSYS_NO_PATHCONV=1 command docker exec -i -w "$WORK_DIR" "$CONTAINER" bash -c "$CMD"
+log "exec: docker exec -i -w $WORK_DIR $CONTAINER bash -c ..."
+MSYS_NO_PATHCONV=1 command docker exec -i -w "$WORK_DIR" "$CONTAINER" bash -c "$CMD" 2>&1
 EXIT_CODE=$?
+log "exit code: $EXIT_CODE"
 
 # --- CWD tracking ---
-# Read the Docker-internal CWD file, translate path, write to host CWD file
 if [ -n "$CWD_FILE" ]; then
     DOCKER_CWD=$(MSYS_NO_PATHCONV=1 command docker exec "$CONTAINER" cat "$DOCKER_CWD_FILE" 2>/dev/null | tr -d '\r\n')
     if [ -n "$DOCKER_CWD" ]; then
         HOST_CWD=$(container_to_host_path "$DOCKER_CWD")
         printf '%s\n' "$HOST_CWD" >| "$CWD_FILE"
+        log "cwd: $DOCKER_CWD -> $HOST_CWD"
     fi
     MSYS_NO_PATHCONV=1 command docker exec "$CONTAINER" rm -f "$DOCKER_CWD_FILE" 2>/dev/null || true
 fi
@@ -229,8 +222,20 @@ PROXY_SCRIPT
     # Replace placeholders with actual values
     sed -i "s|__CONTAINER__|${container}|g" "$script_path"
     sed -i "s|__PROJECT_DIR__|${posix_project_dir}|g" "$script_path"
+    sed -i "s|__LOG_FILE__|${log_file}|g" "$script_path"
     sed -i 's/\r$//' "$script_path"
     chmod +x "$script_path"
+
+    # Generate .cmd wrapper for Windows — Node.js can't execute bash scripts directly
+    local cmd_wrapper="${script_path}.cmd"
+    local win_script_path
+    win_script_path=$(cygpath -w "$script_path" 2>/dev/null || echo "$script_path")
+
+    # Find bash.exe path
+    local bash_exe
+    bash_exe=$(cygpath -w "$(command -v bash)" 2>/dev/null || echo "C:\\Program Files\\Git\\bin\\bash.exe")
+
+    printf '@"%s" "%s" %%*\r\n' "$bash_exe" "$win_script_path" > "$cmd_wrapper"
 }
 
 # ─── Preflight ──────────────────────────────────────────────────────────────────
@@ -410,18 +415,25 @@ launch() {
         echo "Container '$container' created."
     fi
 
-    # Generate proxy script and launch Claude Code on the HOST
+    # Generate proxy script and .cmd wrapper, launch Claude Code on the HOST
     # Shell commands are proxied to Docker via CLAUDE_CODE_SHELL_PREFIX
     local proxy_script="/tmp/claude-box-proxy-$$"
     generate_proxy_script "$proxy_script" "$container" "$project_dir"
-    trap "rm -f '$proxy_script'" EXIT
+    trap "rm -f '$proxy_script' '${proxy_script}.cmd'" EXIT
+
+    # Use .cmd wrapper on Windows (Node.js can't spawn bash scripts directly)
+    local shell_prefix="$proxy_script"
+    if [ -f "${proxy_script}.cmd" ]; then
+        shell_prefix=$(cygpath -w "${proxy_script}.cmd" 2>/dev/null || echo "${proxy_script}.cmd")
+    fi
 
     echo "Launching Claude Code (host) with shell proxy to container..."
     echo "  Shell commands run inside: $container"
     echo "  Clipboard / Alt+V: native (works!)"
+    echo "  Debug log: /tmp/claude-box-proxy.log"
     echo ""
 
-    CLAUDE_CODE_SHELL_PREFIX="$proxy_script" npx @anthropic-ai/claude-code --dangerously-skip-permissions
+    CLAUDE_CODE_SHELL_PREFIX="$shell_prefix" npx @anthropic-ai/claude-code --dangerously-skip-permissions
 }
 
 # ─── Commands ───────────────────────────────────────────────────────────────────
